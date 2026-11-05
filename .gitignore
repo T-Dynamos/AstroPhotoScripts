@@ -218,3 +218,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Project output directories
+output/
+outputs/
+*.tiff
+*.hdr
+*.exr
