@@ -45,7 +45,7 @@ def select_best_ground_exposure(
     ground_aligned_images: List[np.ndarray],
     ground_mask: np.ndarray,
     metadata_list: List[ImageMetadata],
-    max_clip_allowed_pct: float = 0.50,
+    max_clip_allowed_pct: float = 8.0,
 ) -> Tuple[int, np.ndarray]:
     """Select the single brightest landscape exposure that does NOT exceed highlight clipping limits.
 
@@ -53,7 +53,7 @@ def select_best_ground_exposure(
         ground_aligned_images: List of float32 BGR images.
         ground_mask: Mask of terrain (1.0 = ground).
         metadata_list: List of image metadata.
-        max_clip_allowed_pct: Maximum allowable percentage of blown pixels in ground.
+        max_clip_allowed_pct: Maximum allowable percentage of blown pixels in ground (default: 8.0%).
 
     Returns:
         Tuple of (selected_index, selected_ground_image).
@@ -90,7 +90,7 @@ def fuse_ground_mertens(
     ground_aligned_images: List[np.ndarray],
     ground_mask: np.ndarray,
     metadata_list: List[ImageMetadata],
-    max_clip_allowed_pct: float = 0.50,
+    max_clip_allowed_pct: float = 8.0,
     contrast_weight: float = 1.2,
     saturation_weight: float = 1.0,
     exposure_weight: float = 1.0,

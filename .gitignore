@@ -222,6 +222,7 @@ __marimo__/
 # Project output directories
 output/
 outputs/
+output*/
 *.tiff
 *.hdr
 *.exr

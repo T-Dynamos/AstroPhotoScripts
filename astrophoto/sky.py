@@ -11,6 +11,7 @@ def stack_sky_exposures(
     star_aligned_images: List[np.ndarray],
     exposure_times: List[Optional[float]],
     method: str = "weighted",
+    iso_values: Optional[List[Optional[int]]] = None,
 ) -> np.ndarray:
     """Stack star-aligned images to suppress sensor thermal and read noise."""
     if method == "median" and len(star_aligned_images) >= 3:
@@ -18,7 +19,15 @@ def stack_sky_exposures(
         return np.median(stack, axis=0).astype(np.float32)
 
     valid_times = [t if (t is not None and t > 0) else 1.0 for t in exposure_times]
-    weights = np.sqrt(np.array(valid_times, dtype=np.float32))
+    if iso_values is not None:
+        eff_exposures = [
+            t * (iso / 100.0 if (iso is not None and iso > 0) else 1.0)
+            for t, iso in zip(valid_times, iso_values)
+        ]
+    else:
+        eff_exposures = valid_times
+
+    weights = np.sqrt(np.array(eff_exposures, dtype=np.float32))
     weights /= np.sum(weights)
 
     stacked = np.zeros_like(star_aligned_images[0], dtype=np.float32)

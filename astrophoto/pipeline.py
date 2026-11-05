@@ -40,7 +40,7 @@ class PipelineConfig:
     ground_mode: str = "fuse"  # 'fuse' or 'select'
     foreground_type: str = "auto"  # 'auto', 'illuminated', or 'silhouette'
     horizon_radius: int = 25
-    max_ground_clip_pct: float = 0.50
+    max_ground_clip_pct: float = 8.0
     sky_stack_method: str = "weighted"  # 'weighted' or 'median'
     sky_stretch_beta: float = 28.0
     denoise_sky: bool = True
@@ -138,12 +138,18 @@ class AstroPipeline:
         # Step 5: Celestial star alignment & sky processing
         print("[5/6] Tracking celestial star drift & stacking starry sky (with ground isolation)...")
         exp_times = [m.exposure_time for m in metadata_list]
-        # Pass mask_sky to compute_celestial_star_drift so phase correlation tracks pure celestial stars
-        star_shifts = compute_celestial_star_drift(images_bgr, ref_idx=ref_idx, mask_sky=mask_sky)
-        # Pass mask_sky to isolate sky and prevent shifted ground silhouettes from polluting sky near horizon
-        star_aligned_skies = warp_sky_to_stars(images_bgr, star_shifts, mask_sky=mask_sky)
+        iso_vals = [m.iso for m in metadata_list]
+        # Track celestial stars on ground_aligned frames where terrestrial shake has been eliminated
+        star_shifts = compute_celestial_star_drift(ground_aligned, ref_idx=ref_idx, mask_sky=mask_sky)
+        # Warp ground-isolated sky frames to register stars with the reference frame
+        star_aligned_skies = warp_sky_to_stars(ground_aligned, star_shifts, mask_sky=mask_sky)
 
-        sky_stacked = stack_sky_exposures(star_aligned_skies, exp_times, method=self.config.sky_stack_method)
+        sky_stacked = stack_sky_exposures(
+            star_aligned_skies,
+            exp_times,
+            method=self.config.sky_stack_method,
+            iso_values=iso_vals,
+        )
         sky_leveled = flatten_sky_background(sky_stacked, mask_sky)
         sky_stretched = stretch_sky_asinh(sky_leveled, mask_sky, beta=self.config.sky_stretch_beta)
 

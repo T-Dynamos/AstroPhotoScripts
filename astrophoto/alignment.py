@@ -131,24 +131,26 @@ def compute_celestial_star_drift(
     ref_img = images_bgr[ref_idx]
     h, w = ref_img.shape[:2]
 
-    # Determine safe sky height strictly above any terrestrial horizon
+    # Determine celestial region strictly isolated to open night sky
     if mask_sky is not None:
         m2d = mask_sky[:, :, 0] if mask_sky.ndim == 3 else mask_sky
-        # Find rows where foreground starts
-        fg_indices = np.where(m2d < 0.5)[0]
-        if len(fg_indices) > 0:
-            first_fg_row = int(fg_indices.min())
-            # Keep a 5% safety margin above the highest terrestrial object
-            sky_h = max(int(h * 0.25), first_fg_row - int(h * 0.03))
+        sky_pts = np.where(m2d > 0.80)
+        if len(sky_pts[0]) > 500:
+            sy1, sy2 = int(sky_pts[0].min()), int(sky_pts[0].max())
+            sx1, sx2 = int(sky_pts[1].min()), int(sky_pts[1].max())
+            if (sy2 - sy1) < 64 or (sx2 - sx1) < 64:
+                sy1, sy2, sx1, sx2 = 0, int(h * sky_crop_fraction), 0, w
         else:
-            sky_h = int(h * sky_crop_fraction)
+            sy1, sy2, sx1, sx2 = 0, int(h * sky_crop_fraction), 0, w
     else:
-        sky_h = int(h * sky_crop_fraction)
+        m2d = None
+        sy1, sy2, sx1, sx2 = 0, int(h * sky_crop_fraction), 0, w
 
-    sky_h = min(sky_h, int(h * 0.85))
+    cw = sx2 - sx1
+    ch = sy2 - sy1
 
     def isolate_stars_dog(img_bgr: np.ndarray) -> np.ndarray:
-        crop = img_bgr[:sky_h, :]
+        crop = img_bgr[sy1:sy2, sx1:sx2]
         gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop
         if gray.dtype != np.float32:
             gray = gray.astype(np.float32)
@@ -168,11 +170,11 @@ def compute_celestial_star_drift(
             dog_norm = dog
 
         # Suppress residual low-level sensor thermal noise floor
-        dog_norm[dog_norm < 0.12] = 0.0
+        dog_norm[dog_norm < 0.15] = 0.0
         return dog_norm.astype(np.float32)
 
     ref_stars = isolate_stars_dog(ref_img)
-    hann = cv2.createHanningWindow((w, sky_h), cv2.CV_32F)
+    hann = cv2.createHanningWindow((cw, ch), cv2.CV_32F)
     shifts: List[Tuple[float, float]] = []
 
     for i, img in enumerate(images_bgr):
@@ -184,7 +186,7 @@ def compute_celestial_star_drift(
         cur_stars = isolate_stars_dog(img)
         (dx, dy), response = cv2.phaseCorrelate(ref_stars, cur_stars, hann)
 
-        # Sanity check: if response is low, fallback to ORB matching in sky
+        # Sanity check: if response is low, fallback to robust RANSAC feature matching
         if response < 0.15:
             try:
                 orb = cv2.ORB_create(nfeatures=1500)
@@ -196,13 +198,20 @@ def compute_celestial_star_drift(
                     matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
                     matches = sorted(matcher.match(des1, des2), key=lambda x: x.distance)[:80]
                     if len(matches) >= 6:
-                        pts_r = np.float32([kp1[m.queryIdx].pt for m in matches])
-                        pts_c = np.float32([kp2[m.trainIdx].pt for m in matches])
-                        diffs = pts_r - pts_c
-                        dx_med, dy_med = float(np.median(diffs[:, 0])), float(np.median(diffs[:, 1]))
-                        dx, dy, response = dx_med, dy_med, 0.35
+                        pts_r = np.float32([kp1[m.queryIdx].pt for m in matches]).reshape(-1, 1, 2)
+                        pts_c = np.float32([kp2[m.trainIdx].pt for m in matches]).reshape(-1, 1, 2)
+                        M, inliers = cv2.estimateAffinePartial2D(pts_c, pts_r, method=cv2.RANSAC, ransacReprojThreshold=3.0)
+                        if M is not None and inliers is not None and np.sum(inliers) >= 4:
+                            orb_dx, orb_dy = float(M[0, 2]), float(M[1, 2])
+                            if abs(orb_dx) < w * 0.15 and abs(orb_dy) < h * 0.15:
+                                dx, dy, response = orb_dx, orb_dy, 0.35
             except Exception:
                 pass
+
+        # Bounding check: celestial drift across exposures should never exceed physical limits
+        if abs(dx) > (w * 0.10) or abs(dy) > (h * 0.10):
+            print(f"  [Star Drift] Warning: Improbable shift detected ({dx:.1f}px, {dy:.1f}px). Resetting to (0, 0).")
+            dx, dy = 0.0, 0.0
 
         shifts.append((float(dx), float(dy)))
         print(f"  [Star Drift] Image {i+1}/{len(images_bgr)}: dx={dx:+.2f}px, dy={dy:+.2f}px (response: {response:.3f})")

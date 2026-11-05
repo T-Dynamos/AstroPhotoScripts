@@ -44,8 +44,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Guided filter edge refinement radius for tree branches, rooflines, and landscape boundaries (default: 31)."
     )
     run_parser.add_argument(
-        "--max-clip", type=float, default=0.50,
-        help="Maximum allowable highlight clipping percentage for the landscape (default: 0.50%%)."
+        "--max-clip", type=float, default=8.0,
+        help="Maximum allowable highlight clipping percentage for the landscape (default: 8.0%%)."
     )
     run_parser.add_argument(
         "--sky-method", choices=["weighted", "median"], default="weighted",
