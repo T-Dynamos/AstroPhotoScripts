@@ -41,6 +41,12 @@ Inspect shutter speeds, ISOs, formats, and highlight/shadow clipping without run
 astrophoto inspect /path/to/exposures
 ```
 
+### 3. Local Constellation & DSO Auto-Identification (Plate Solving)
+Locally auto-identify constellations, stars, and deep-sky objects (e.g., Orion, M42 Nebula, Pleiades) and draw glowing celestial overlays:
+```bash
+astrophoto identify output/astro_composite.jpg
+```
+
 ---
 
 ## CLI Options

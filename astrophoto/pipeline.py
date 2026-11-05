@@ -16,6 +16,7 @@ from .alignment import (
     warp_sky_to_stars,
 )
 from .composite import blend_composite, create_comparison_card, segment_horizon_mask
+from .identify import annotate_constellations
 from .io import (
     ImageMetadata,
     discover_images,
@@ -44,6 +45,7 @@ class PipelineConfig:
     sky_stretch_beta: float = 28.0
     denoise_sky: bool = True
     save_intermediate_layers: bool = True
+    annotate: bool = True
     ref_idx: int = 0
 
 
@@ -176,12 +178,27 @@ class AstroPipeline:
         card_path = self.config.output_dir / "comparison_summary.jpg"
         cv2.imwrite(str(card_path), card, [cv2.IMWRITE_JPEG_QUALITY, 92])
 
+        # Plate solving & constellation annotation
+        annotated_path = None
+        if self.config.annotate:
+            print("[Auto-Identify] Plate-solving celestial objects and drawing constellation overlay...")
+            annotated_out = self.config.output_dir / "annotated_sky.jpg"
+            _, ok = annotate_constellations(
+                (composite * 255).astype(np.uint8),
+                mask_sky=mask_sky,
+                output_path=annotated_out,
+            )
+            if ok:
+                annotated_path = annotated_out
+
         elapsed = time.time() - start_time
         print(f"\n=======================================================")
         print(f"Pipeline finished successfully in {elapsed:.1f}s!")
         print(f"  -> 16-bit TIFF Master: {out_tiff.resolve()}")
         print(f"  -> Display Preview:    {out_preview.resolve()}")
         print(f"  -> Comparison Card:    {card_path.resolve()}")
+        if annotated_path:
+            print(f"  -> Annotated Overlay:  {annotated_path.resolve()}")
         print(f"=======================================================\n")
 
         return out_preview

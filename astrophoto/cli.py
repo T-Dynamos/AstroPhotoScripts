@@ -7,6 +7,7 @@ from pathlib import Path
 import sys
 
 from . import __version__
+from .identify import annotate_constellations
 from .io import discover_images, load_image
 from .pipeline import AstroPipeline, PipelineConfig
 
@@ -62,6 +63,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-layers", action="store_true",
         help="Skip saving individual intermediate layers (ground_layer, sky_layer, horizon_mask)."
     )
+    run_parser.add_argument(
+        "--annotate", action="store_true", default=True,
+        help="Automatically plate-solve, identify constellations and deep-sky objects, and save annotated overlay."
+    )
+
+    # Command: identify
+    identify_parser = subparsers.add_parser(
+        "identify", help="Locally auto-identify constellations and deep-sky objects on an image and draw annotations."
+    )
+    identify_parser.add_argument(
+        "image", type=str,
+        help="Path to night sky image to solve and annotate."
+    )
+    identify_parser.add_argument(
+        "--output", "-o", type=str, default=None,
+        help="Output path for annotated image (default: <image_stem>_annotated.jpg)."
+    )
 
     # Command: inspect
     inspect_parser = subparsers.add_parser("inspect", help="Inspect image metadata, dynamic range, and highlight clipping.")
@@ -96,6 +114,29 @@ def handle_inspect(input_dir: Path) -> None:
     print("=" * 90 + "\n")
 
 
+def handle_identify(image_path: Path, output_path: Optional[Path] = None) -> None:
+    image_path = Path(image_path)
+    if not image_path.exists():
+        print(f"Error: Image not found: {image_path.resolve()}")
+        sys.exit(1)
+
+    import cv2
+    img = cv2.imread(str(image_path))
+    if img is None:
+        print(f"Error: Could not read image: {image_path.resolve()}")
+        sys.exit(1)
+
+    if output_path is None:
+        output_path = image_path.parent / f"{image_path.stem}_annotated.jpg"
+
+    print(f"\n[Identify] Plate-solving celestial objects in: {image_path.name}...")
+    annotated, success = annotate_constellations(img, output_path=output_path)
+    if success:
+        print(f"  -> Successfully generated: {output_path.resolve()}\n")
+    else:
+        print("  -> Constellation matching did not meet confidence threshold.\n")
+
+
 def main() -> None:
     parser = build_parser()
     # Default to 'run' if called without a subcommand but with arguments or defaults
@@ -111,6 +152,9 @@ def main() -> None:
 
     if args.command == "inspect":
         handle_inspect(Path(args.input))
+    elif args.command == "identify":
+        out = Path(args.output) if args.output else None
+        handle_identify(Path(args.image), output_path=out)
     elif args.command == "run":
         config = PipelineConfig(
             input_dir=Path(args.input),
@@ -123,6 +167,7 @@ def main() -> None:
             sky_stretch_beta=args.stretch,
             denoise_sky=not args.no_denoise,
             save_intermediate_layers=not args.no_layers,
+            annotate=args.annotate,
         )
         pipeline = AstroPipeline(config)
         pipeline.run()
