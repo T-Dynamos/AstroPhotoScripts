@@ -120,35 +120,80 @@ def blend_composite(
 
 
 def create_comparison_card(
-    longest_shot: np.ndarray,
-    foreground_layer: Optional[np.ndarray] = None,
-    final_composite: Optional[np.ndarray] = None,
-    ground_layer: Optional[np.ndarray] = None,
-    shutter_label: str = "Longest Exposure",
-    thumb_w: int = 533,
-    thumb_h: int = 400,
+    input_images: List[np.ndarray],
+    input_labels: List[str],
+    landscape_layer: np.ndarray,
+    sky_layer: np.ndarray,
+    final_composite: np.ndarray,
+    target_width: int = 1800,
+    **kwargs,
 ) -> np.ndarray:
-    """Create a 3-panel comparison card (Raw Blown Shot vs Landscape Layer vs Final Composite)."""
-    # Accept ground_layer as alias for foreground_layer
-    fg = foreground_layer if foreground_layer is not None else ground_layer
+    """Create a comprehensive multi-row comparison summary card.
 
+    Row 1: All raw input exposures labeled with shutter speeds and metadata.
+    Divider: Section separator.
+    Row 2: Processed deliverables:
+           - Highlight-safe landscape layer
+           - Celestial star-aligned & stretched sky layer
+           - Final AstroPhotoScripts composite master
+    """
     def to_u8(img: np.ndarray) -> np.ndarray:
         if img.dtype != np.uint8:
             return np.clip(img * 255.0, 0, 255).astype(np.uint8)
         return img
 
-    t1 = cv2.resize(to_u8(longest_shot), (thumb_w, thumb_h))
-    t2 = cv2.resize(to_u8(fg), (thumb_w, thumb_h))
-    t3 = cv2.resize(to_u8(final_composite), (thumb_w, thumb_h))
+    def make_card(img: np.ndarray, title: str, w: int, h: int) -> np.ndarray:
+        u8 = to_u8(img)
+        thumb = cv2.resize(u8, (w, h))
+        banner = np.zeros((36, w, 3), dtype=np.uint8)
+        cv2.putText(
+            banner, title, (12, 24),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 1, cv2.LINE_AA
+        )
+        return np.vstack([banner, thumb])
 
-    def add_banner(thumb: np.ndarray, text: str) -> np.ndarray:
-        bar = np.zeros((40, thumb.shape[1], 3), dtype=np.uint8)
-        cv2.putText(bar, text, (14, 27), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (255, 255, 255), 1, cv2.LINE_AA)
-        return np.vstack([bar, thumb])
+    # Backward compatibility if called with old 3-arg signature
+    if not isinstance(input_images, list):
+        longest_shot = input_images
+        fg = input_labels if isinstance(input_labels, np.ndarray) else landscape_layer
+        comp = landscape_layer if isinstance(landscape_layer, np.ndarray) else final_composite
+        t_w, t_h = target_width // 3, int((target_width // 3) * 0.75)
+        c1 = make_card(longest_shot, "Single Long Exposure (Overexposed)", t_w, t_h)
+        c2 = make_card(fg, "Landscape Layer (Highlight-Safe)", t_w, t_h)
+        c3 = make_card(comp, "AstroPhotoScripts Final Master", target_width - 2 * t_w, t_h)
+        return np.hstack([c1, c2, c3])
 
-    card = np.hstack([
-        add_banner(t1, f"Single Shot ({shutter_label}) - Overexposed"),
-        add_banner(t2, "Selected/Fused Landscape Layer"),
-        add_banner(t3, "AstroPhotoScripts Dual-Stack Output"),
-    ])
+    num_inputs = max(1, len(input_images))
+    col_w = max(200, target_width // num_inputs)
+    col_h = int(col_w * 0.75)
+
+    # Row 1: All input exposures
+    row1_cards = [
+        make_card(img, label, col_w, col_h)
+        for img, label in zip(input_images, input_labels)
+    ]
+    row1 = np.hstack(row1_cards)
+    actual_w = row1.shape[1]
+
+    # Row 2: 3 key processed deliverables
+    r2_col_w = actual_w // 3
+    r2_col_h = int(r2_col_w * 0.70)
+    row2_cards = [
+        make_card(landscape_layer, "Landscape Layer (Highlight-Safe)", r2_col_w, r2_col_h),
+        make_card(sky_layer, "Celestial Sky (Star-Stacked)", r2_col_w, r2_col_h),
+        make_card(final_composite, "AstroPhotoScripts Final Master", actual_w - 2 * r2_col_w, r2_col_h),
+    ]
+    row2 = np.hstack(row2_cards)
+
+    # Divider bar
+    divider = np.zeros((26, actual_w, 3), dtype=np.uint8)
+    div_text = "--- PROCESSED DELIVERABLES ---"
+    text_size = cv2.getTextSize(div_text, cv2.FONT_HERSHEY_SIMPLEX, 0.48, 1)[0]
+    text_x = max(10, (actual_w - text_size[0]) // 2)
+    cv2.putText(
+        divider, div_text, (text_x, 18),
+        cv2.FONT_HERSHEY_SIMPLEX, 0.48, (180, 180, 180), 1, cv2.LINE_AA
+    )
+
+    card = np.vstack([row1, divider, row2])
     return card

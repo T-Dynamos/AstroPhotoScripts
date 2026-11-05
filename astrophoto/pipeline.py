@@ -160,13 +160,18 @@ class AstroPipeline:
             save_preview_jpeg(sky_final, self.config.output_dir / "sky_layer.jpg")
             save_preview_jpeg(mask_ground, self.config.output_dir / "horizon_mask.jpg")
 
-        # Generate comparison card
-        longest_label = metadata_list[-1].shutter_str
+        # Generate multi-row comparison card (all inputs + deliverables)
+        input_labels = [
+            f"Input #{i+1}: {m.shutter_str}" + (f" (ISO {m.iso})" if m.iso else "")
+            for i, m in enumerate(metadata_list)
+        ]
         card = create_comparison_card(
-            longest_shot=images_bgr[-1],
-            ground_layer=ground_layer,
+            input_images=images_bgr,
+            input_labels=input_labels,
+            landscape_layer=ground_layer,
+            sky_layer=sky_final,
             final_composite=composite,
-            shutter_label=longest_label,
+            target_width=1800,
         )
         card_path = self.config.output_dir / "comparison_summary.jpg"
         cv2.imwrite(str(card_path), card, [cv2.IMWRITE_JPEG_QUALITY, 92])
