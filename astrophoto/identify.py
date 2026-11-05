@@ -145,6 +145,8 @@ def detect_stars_subpixel(
     Returns:
         List of tuples: (x_float, y_float, peak_flux).
     """
+    if img_bgr.dtype == np.float64:
+        img_bgr = img_bgr.astype(np.float32)
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY) if img_bgr.ndim == 3 else img_bgr
     if gray.dtype != np.uint8:
         gray_u8 = np.clip(gray * 255.0, 0, 255).astype(np.uint8)

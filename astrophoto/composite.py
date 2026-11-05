@@ -47,55 +47,93 @@ def guided_filter(
 def segment_horizon_mask(
     reference_image_bgr: np.ndarray,
     foreground_type: str = "auto",
-    guided_radius: int = 15,
+    guided_radius: int = 25,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Segment any terrestrial foreground (trees, buildings, landscape) from celestial sky."""
+    """Segment any terrestrial foreground (mountains, trees, buildings, railings, balconies) from celestial sky.
+
+    Uses normalized multi-cue Otsu segmentation anchored to the bottom terrestrial edge,
+    eliminating false mountain blobs or domes in the night sky.
+    Refines boundaries with an edge-preserving guided filter to ensure seamless alpha blending.
+    """
     if reference_image_bgr.dtype != np.float32:
-        img_float = reference_image_bgr.astype(np.float32) / 255.0
+        img_float = reference_image_bgr.astype(np.float32)
+        if img_float.max() > 1.5:
+            img_float /= 255.0
     else:
         img_float = reference_image_bgr
 
     h, w = img_float.shape[:2]
     gray = cv2.cvtColor(img_float, cv2.COLOR_BGR2GRAY)
 
-    top_half = gray[:int(h * 0.45), :]
-    bottom_half = gray[int(h * 0.55):, :]
-    top_mean = float(np.mean(top_half))
-    bottom_mean = float(np.mean(bottom_half))
+    # Robust percentile normalization (works across RAW DNG linear values and gamma JPEGs)
+    p2 = float(np.percentile(gray, 2))
+    p98 = float(np.percentile(gray, 98))
+    norm_gray = np.clip((gray - p2) / max(1e-4, p98 - p2), 0.0, 1.0)
+
+    # Morphological star removal so star point sources do not trigger false foreground edges
+    star_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    smooth_gray = cv2.morphologyEx(norm_gray, cv2.MORPH_OPEN, star_kernel)
+    smooth_gray = cv2.GaussianBlur(smooth_gray, (15, 15), 0)
+
+    # Sample zenith sky (top 25%) vs terrestrial ground (bottom 20%)
+    sky_sample = smooth_gray[:int(h * 0.25), :]
+    ground_sample = smooth_gray[int(h * 0.80):, :]
+    sky_mean = float(np.mean(sky_sample))
+    ground_mean = float(np.mean(ground_sample))
+
+    # Otsu thresholding on lower 75% of the frame
+    roi = smooth_gray[int(h * 0.20):, :]
+    roi_u8 = (roi * 255).astype(np.uint8)
+    otsu_thresh, _ = cv2.threshold(roi_u8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    otsu_val = otsu_thresh / 255.0
 
     if foreground_type == "auto":
-        is_illuminated = bottom_mean >= top_mean
+        is_illuminated = ground_mean >= sky_mean
     else:
         is_illuminated = foreground_type.lower() == "illuminated"
 
-    blur = cv2.GaussianBlur(gray, (15, 15), 0)
-
     if is_illuminated:
-        sky_baseline = float(np.percentile(top_half, 40))
-        ground_baseline = float(np.percentile(bottom_half, 40))
-        thresh_val = sky_baseline + (ground_baseline - sky_baseline) * 0.30
-        thresh_val = max(0.04, min(thresh_val, 0.35))
-        coarse_mask = (blur > thresh_val).astype(np.uint8) * 255
+        thresh = (otsu_val + sky_mean) / 2.0 if otsu_val > sky_mean else (sky_mean + ground_mean) / 2.0
+        raw_mask = (smooth_gray > thresh).astype(np.float32)
     else:
-        sky_baseline = float(np.percentile(top_half, 60))
-        ground_baseline = float(np.percentile(bottom_half, 40))
-        thresh_val = ground_baseline + (sky_baseline - ground_baseline) * 0.50
-        coarse_mask = (blur < thresh_val).astype(np.uint8) * 255
+        thresh = (otsu_val + ground_mean) / 2.0 if otsu_val < sky_mean else (sky_mean + ground_mean) / 2.0
+        raw_mask = (smooth_gray < thresh).astype(np.float32)
 
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (17, 17))
-    coarse_mask = cv2.morphologyEx(coarse_mask, cv2.MORPH_CLOSE, kernel)
+    # Guaranteed topological priors:
+    # 1. Top 18% is guaranteed to be sky
+    raw_mask[:int(h * 0.18), :] = 0.0
+    # 2. Bottom 5% is guaranteed to be ground
+    raw_mask[int(h * 0.95):, :] = 1.0
 
-    contours, _ = cv2.findContours(coarse_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    filled = np.zeros_like(coarse_mask)
-    min_area = int(w * h * 0.015)
-    for c in contours:
-        if cv2.contourArea(c) > min_area:
-            cv2.drawContours(filled, [c], -1, 255, -1)
+    # Morphological closing to seal small wire/railing/mesh gaps
+    mask_u8 = (raw_mask * 255).astype(np.uint8)
+    close_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 25))
+    mask_closed = cv2.morphologyEx(mask_u8, cv2.MORPH_CLOSE, close_kernel)
 
-    filled[int(h * 0.95):, :] = 255
+    # Connected component analysis: keep ONLY components touching the bottom edge (ground)
+    # This completely eliminates floating false mountain blobs/domes in the sky
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask_closed)
+    ground_mask = np.zeros((h, w), dtype=np.uint8)
+    bottom_labels = set(labels[-1, :]) | set(labels[-3, :]) | set(labels[-10, :])
+    if 0 in bottom_labels:
+        bottom_labels.remove(0)
 
-    coarse_float = filled.astype(np.float32) / 255.0
-    refined_mask = guided_filter(gray, coarse_float, radius=guided_radius, eps=1e-3)
+    for lbl in bottom_labels:
+        if stats[lbl, cv2.CC_STAT_AREA] > (w * h * 0.005):
+            ground_mask[labels == lbl] = 255
+
+    # Fill downward per column from the topmost detected terrestrial point
+    # Ensures solid terrain/mountains/balconies without false sky holes
+    step = 2
+    for c in range(0, w, step):
+        fg_rows = np.where(ground_mask[:, c] == 255)[0]
+        if len(fg_rows) > 0:
+            first_fg = fg_rows[0]
+            ground_mask[first_fg:, max(0, c - step // 2):min(w, c + step // 2 + 1)] = 255
+
+    # Edge-preserving guided filter refinement on normalized grayscale
+    coarse_float = ground_mask.astype(np.float32) / 255.0
+    refined_mask = guided_filter(norm_gray, coarse_float, radius=guided_radius, eps=1e-3)
 
     mask_fg = np.expand_dims(refined_mask, axis=2)
     mask_sky = 1.0 - mask_fg

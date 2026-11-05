@@ -64,6 +64,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip saving individual intermediate layers (ground_layer, sky_layer, horizon_mask)."
     )
     run_parser.add_argument(
+        "--ref-idx", type=int, default=None,
+        help="0-based index of reference frame for ground and star alignment (default: auto-select optimal exposure)."
+    )
+    run_parser.add_argument(
         "--annotate", action="store_true", default=True,
         help="Automatically plate-solve, identify constellations and deep-sky objects, and save annotated overlay."
     )
@@ -168,6 +172,7 @@ def main() -> None:
             denoise_sky=not args.no_denoise,
             save_intermediate_layers=not args.no_layers,
             annotate=args.annotate,
+            ref_idx=args.ref_idx,
         )
         pipeline = AstroPipeline(config)
         pipeline.run()

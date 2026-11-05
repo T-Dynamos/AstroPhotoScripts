@@ -103,17 +103,33 @@ def stretch_sky_asinh(
 
 def denoise_sky_chroma(
     sky_bgr: np.ndarray,
-    h_lum: float = 4.0,
-    h_color: float = 6.0,
+    h_chroma: float = 7.0,
+    preserve_luminance_stars: bool = True,
 ) -> np.ndarray:
-    """Apply selective chroma and background denoising without softening star cores."""
-    u8 = np.clip(sky_bgr * 255.0, 0, 255).astype(np.uint8)
-    denoised = cv2.fastNlMeansDenoisingColored(
-        u8,
-        None,
-        h=h_lum,
-        hColor=h_color,
-        templateWindowSize=7,
-        searchWindowSize=17,
-    )
-    return denoised.astype(np.float32) / 255.0
+    """Apply selective chroma denoising without softening star cores.
+
+    Converts to CIE-Lab color space and filters only the 'a' and 'b' chrominance channels
+    to eliminate color blotchiness and sensor thermal color noise in the sky background,
+    while leaving the 'L' (luminance) channel completely untouched so star pinpoints
+    and fine celestial structures remain 100% sharp and crisp.
+    """
+    if sky_bgr.dtype != np.float32:
+        img_float = sky_bgr.astype(np.float32)
+        if img_float.max() > 1.5:
+            img_float /= 255.0
+    else:
+        img_float = sky_bgr
+
+    u8 = np.clip(img_float * 255.0, 0, 255).astype(np.uint8)
+    lab = cv2.cvtColor(u8, cv2.COLOR_BGR2LAB)
+    L, a, b = cv2.split(lab)
+
+    # Multi-threaded fast Gaussian chroma smoothing for blotch removal
+    # (or bilateral filter if desired)
+    ksize = int(h_chroma * 2) | 1  # ensure odd kernel size
+    a_clean = cv2.GaussianBlur(a, (ksize, ksize), 0)
+    b_clean = cv2.GaussianBlur(b, (ksize, ksize), 0)
+
+    lab_clean = cv2.merge([L, a_clean, b_clean])
+    bgr_clean = cv2.cvtColor(lab_clean, cv2.COLOR_LAB2BGR).astype(np.float32) / 255.0
+    return np.clip(bgr_clean, 0.0, 1.0)

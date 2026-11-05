@@ -93,13 +93,14 @@ options:
                       │                                Selective chroma denoising
                       └───────────────────────┬───────────────────────┘
                                               ▼
-                                   [Horizon Ridge Mask]
-                             High-contrast contour segmentation
-                                    Gaussian edge feathering
+                                   [Horizon Segmentation]
+                             Multi-cue bottom-anchored Otsu
+                             Edge-preserving Guided Filter
                                               ▼
                                       [Final Master]
                             16-bit uncompressed master TIFF
                             8-bit JPEG preview & summary card
+                            Offline Constellation Plate Solve (Orion / M42)
 ```
 
 ---

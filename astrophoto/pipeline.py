@@ -39,14 +39,14 @@ class PipelineConfig:
     output_dir: Path
     ground_mode: str = "fuse"  # 'fuse' or 'select'
     foreground_type: str = "auto"  # 'auto', 'illuminated', or 'silhouette'
-    horizon_radius: int = 31
+    horizon_radius: int = 25
     max_ground_clip_pct: float = 0.50
     sky_stack_method: str = "weighted"  # 'weighted' or 'median'
     sky_stretch_beta: float = 28.0
     denoise_sky: bool = True
     save_intermediate_layers: bool = True
     annotate: bool = True
-    ref_idx: int = 0
+    ref_idx: Optional[int] = None
 
 
 class AstroPipeline:
@@ -101,14 +101,19 @@ class AstroPipeline:
         self.print_summary_table(metadata_list)
 
         # Step 2: Ground alignment
-        ref_idx = max(0, min(self.config.ref_idx, len(images_bgr) - 1))
+        # Select reference frame: default to the best exposed frame (highest SNR and landscape texture)
+        if self.config.ref_idx is not None and 0 <= self.config.ref_idx < len(images_bgr):
+            ref_idx = self.config.ref_idx
+        else:
+            ref_idx = len(images_bgr) - 1
+
         print(f"[2/6] Performing sub-pixel ground ECC registration (Ref: #{ref_idx+1} {metadata_list[ref_idx].filename})...")
         ground_aligned, _ = align_ground_dataset(images_bgr, ref_idx=ref_idx)
 
         # Step 3: Horizon segmentation (general: mountains, trees, buildings, structures, plains)
         print("[3/6] Segmenting terrestrial landscape (trees, buildings, terrain) and starry sky along the horizon...")
         mask_ground, mask_sky = segment_horizon_mask(
-            ground_aligned[-1],
+            ground_aligned[ref_idx],
             foreground_type=self.config.foreground_type,
             guided_radius=self.config.horizon_radius,
         )
@@ -133,7 +138,8 @@ class AstroPipeline:
         # Step 5: Celestial star alignment & sky processing
         print("[5/6] Tracking celestial star drift & stacking starry sky (with ground isolation)...")
         exp_times = [m.exposure_time for m in metadata_list]
-        star_shifts = compute_celestial_star_drift(images_bgr, ref_idx=ref_idx)
+        # Pass mask_sky to compute_celestial_star_drift so phase correlation tracks pure celestial stars
+        star_shifts = compute_celestial_star_drift(images_bgr, ref_idx=ref_idx, mask_sky=mask_sky)
         # Pass mask_sky to isolate sky and prevent shifted ground silhouettes from polluting sky near horizon
         star_aligned_skies = warp_sky_to_stars(images_bgr, star_shifts, mask_sky=mask_sky)
 

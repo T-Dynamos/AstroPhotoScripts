@@ -139,14 +139,23 @@ def load_image(path: Path) -> Tuple[np.ndarray, ImageMetadata]:
                 "Install it with: pip install rawpy"
             )
         with rawpy.imread(str(path)) as raw:
-            # 16-bit demosaic with camera white balance and no artificial tone curve clipping
+            # 16-bit AHD demosaicing with camera white balance and no artificial tone curve clipping
+            # four_color_rgb is explicitly False to avoid Bayer grid artifacts in phase correlation
             rgb_16 = raw.postprocess(
+                demosaic_algorithm=rawpy.DemosaicAlgorithm.AHD,
                 use_camera_wb=True,
                 half_size=False,
                 no_auto_bright=True,
+                four_color_rgb=False,
                 output_bps=16,
             )
             bgr_float = cv2.cvtColor(rgb_16, cv2.COLOR_RGB2BGR).astype(np.float32) / 65535.0
+
+            # Subtle unsharp edge restoration to compensate for raw sensor MTF roll-off
+            # Ensures crisp stars and sharp landscape detail without amplifying thermal noise
+            blur_usm = cv2.GaussianBlur(bgr_float, (0, 0), sigmaX=1.0)
+            sharpened = cv2.addWeighted(bgr_float, 1.35, blur_usm, -0.35, 0)
+            bgr_float = np.clip(sharpened, 0.0, 1.0)
     else:
         # Standard format
         img_raw = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
