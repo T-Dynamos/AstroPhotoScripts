@@ -142,3 +142,88 @@ def denoise_sky_chroma(
     lab_clean = cv2.merge([L, a_clean, b_clean])
     bgr_clean = cv2.cvtColor(lab_clean, cv2.COLOR_LAB2BGR).astype(np.float32) / 255.0
     return np.clip(bgr_clean, 0.0, 1.0)
+
+
+def enhance_sky_crop(
+    crop_bgr: np.ndarray,
+    mask_sky_crop: np.ndarray,
+    beta: float = 28.0,
+    target_black: float = 0.035,
+    contrast_boost: float = 1.35,
+    denoise: bool = True,
+    h_chroma: float = 7.0,
+) -> np.ndarray:
+    """Enhance a stacked sky crop: level background, balance blacks/whites, and boost contrast.
+
+    Steps:
+    1. Level background light pollution gradients while preserving stellar pinpoints.
+    2. Neutralize per-channel black pedestal (removing sodium or airglow color casts) and
+       anchor the deep space background to target_black (velvety cosmic floor).
+    3. Calibrate stellar white point to prevent clipping or burning out bright star cores.
+    4. Apply Asinh dynamic range expansion and S-curve midtone contrast boost.
+    5. Selectively suppress chroma color noise in Lab space while preserving pin-sharp star luminance.
+    """
+    m2d = mask_sky_crop[:, :, 0] if mask_sky_crop.ndim == 3 else mask_sky_crop
+    sky_mask_3d = np.expand_dims(m2d, axis=2) if mask_sky_crop.ndim == 2 else mask_sky_crop
+
+    # 1. Background gradient leveling
+    leveled = flatten_sky_background(crop_bgr, sky_mask_3d)
+
+    # 2. Black & white balance
+    sky_idx = m2d > 0.60
+    if not np.any(sky_idx):
+        sky_idx = m2d > 0.20
+
+    b_chan = leveled[:, :, 0]
+    g_chan = leveled[:, :, 1]
+    r_chan = leveled[:, :, 2]
+
+    if np.any(sky_idx):
+        b_black = float(np.percentile(b_chan[sky_idx], 12))
+        g_black = float(np.percentile(g_chan[sky_idx], 12))
+        r_black = float(np.percentile(r_chan[sky_idx], 12))
+    else:
+        b_black = float(np.percentile(b_chan, 10))
+        g_black = float(np.percentile(g_chan, 10))
+        r_black = float(np.percentile(r_chan, 10))
+
+    # Subtract black pedestal per channel (neutralizes color casts)
+    sig_b = np.maximum(b_chan - b_black, 0.0)
+    sig_g = np.maximum(g_chan - g_black, 0.0)
+    sig_r = np.maximum(r_chan - r_black, 0.0)
+
+    # Stellar highlight white point calibration
+    gray = 0.114 * sig_b + 0.587 * sig_g + 0.299 * sig_r
+    if np.any(sky_idx):
+        white_pt = float(np.percentile(gray[sky_idx], 99.95))
+    else:
+        white_pt = float(np.percentile(gray, 99.9))
+    white_pt = max(white_pt, 0.15)
+
+    norm_b = np.clip(sig_b / white_pt, 0.0, 1.0)
+    norm_g = np.clip(sig_g / white_pt, 0.0, 1.0)
+    norm_r = np.clip(sig_r / white_pt, 0.0, 1.0)
+    norm_bgr = np.dstack([norm_b, norm_g, norm_r])
+
+    # 3. Asinh dynamic range stretch
+    denom = max(1e-5, float(np.arcsinh(beta * 1.0)))
+    asinh_sig = np.arcsinh(beta * norm_bgr) / denom
+
+    # 4. S-curve midtone contrast boost
+    if contrast_boost > 1.001:
+        eps = 1e-6
+        v = np.clip(asinh_sig, eps, 1.0 - eps)
+        c = contrast_boost
+        boosted = (v ** c) / (v ** c + (1.0 - v) ** c)
+    else:
+        boosted = asinh_sig
+
+    # 5. Anchor on guaranteed dark sky floor
+    reconstructed = target_black + (1.0 - target_black) * boosted
+    reconstructed = np.clip(reconstructed, 0.0, 1.0).astype(np.float32)
+
+    # 6. Chroma denoising
+    if denoise:
+        reconstructed = denoise_sky_chroma(reconstructed, h_chroma=h_chroma)
+
+    return np.clip(reconstructed, 0.0, 1.0).astype(np.float32)

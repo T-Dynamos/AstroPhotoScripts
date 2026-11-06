@@ -60,6 +60,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Astrophotography Asinh contrast stretch factor for faint stars and nebulae (default: 28.0)."
     )
     run_parser.add_argument(
+        "--contrast-boost", type=float, default=1.35,
+        help="S-curve contrast boost factor for stellar midtones and nebulae (default: 1.35)."
+    )
+    run_parser.add_argument(
+        "--black-floor", type=float, default=0.035,
+        help="Normalized cosmic black floor anchor to prevent deep space clipping and dark lines (default: 0.035)."
+    )
+    run_parser.add_argument(
         "--no-denoise", action="store_true",
         help="Disable chroma noise suppression on sky background."
     )
@@ -174,6 +182,8 @@ def main() -> None:
             max_ground_clip_pct=args.max_clip,
             sky_stack_method=args.sky_method,
             sky_stretch_beta=args.stretch,
+            contrast_boost=args.contrast_boost,
+            target_black_floor=args.black_floor,
             denoise_sky=not args.no_denoise,
             save_intermediate_layers=not args.no_layers,
             annotate=args.annotate,

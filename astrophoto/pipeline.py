@@ -13,6 +13,8 @@ from . import enable_opencv_multithreading
 from .alignment import (
     align_ground_dataset,
     compute_celestial_star_drift,
+    extract_and_align_sky_crops,
+    get_sky_crop_bbox,
     warp_sky_to_stars,
 )
 from .composite import blend_composite, create_comparison_card, segment_horizon_mask
@@ -27,6 +29,7 @@ from .io import (
 from .landscape import fuse_ground_mertens, select_best_ground_exposure
 from .sky import (
     denoise_sky_chroma,
+    enhance_sky_crop,
     flatten_sky_background,
     stack_sky_exposures,
     stretch_sky_asinh,
@@ -44,6 +47,8 @@ class PipelineConfig:
     max_ground_clip_pct: float = 8.0
     sky_stack_method: str = "weighted"  # 'weighted' or 'median'
     sky_stretch_beta: float = 28.0
+    contrast_boost: float = 1.35
+    target_black_floor: float = 0.035
     denoise_sky: bool = True
     save_intermediate_layers: bool = True
     annotate: bool = True
@@ -137,29 +142,39 @@ class AstroPipeline:
                 max_clip_allowed_pct=self.config.max_ground_clip_pct,
             )
 
-        # Step 5: Celestial star alignment & sky processing
-        print("[5/6] Tracking celestial star drift & stacking starry sky (with ground isolation)...")
+        # Step 5: Cropped celestial star alignment, stacking, and contrast enhancement
+        print("[5/6] Extracting sky crops, tracking celestial drift across all exposures & enhancing sky...")
         exp_times = [m.exposure_time for m in metadata_list]
         iso_vals = [m.iso for m in metadata_list]
-        # Track celestial stars on ground_aligned frames where terrestrial shake has been eliminated
-        star_shifts = compute_celestial_star_drift(ground_aligned, ref_idx=ref_idx, mask_sky=mask_sky)
-        # Warp ground-isolated sky frames to register stars with the reference frame
-        star_aligned_skies = warp_sky_to_stars(ground_aligned, star_shifts, mask_sky=mask_sky)
 
-        sky_stacked = stack_sky_exposures(
-            star_aligned_skies,
+        # Extract cropped sky regions across all shutter speeds and sub-pixel register stars
+        aligned_sky_crops, (ymin, ymax, xmin, xmax), star_shifts = extract_and_align_sky_crops(
+            ground_aligned, mask_sky, ref_idx=ref_idx
+        )
+
+        # Stack aligned sky crops (weighted by exposure & ISO)
+        stacked_sky_crop = stack_sky_exposures(
+            aligned_sky_crops,
             exp_times,
             method=self.config.sky_stack_method,
             iso_values=iso_vals,
         )
-        sky_leveled = flatten_sky_background(sky_stacked, mask_sky)
-        sky_stretched = stretch_sky_asinh(sky_leveled, mask_sky, beta=self.config.sky_stretch_beta)
 
-        if self.config.denoise_sky:
-            print("  Applying noise suppression to sky background...")
-            sky_final = denoise_sky_chroma(sky_stretched)
-        else:
-            sky_final = sky_stretched
+        # Balance blacks & whites, boost contrast, and denoise the cropped sky
+        crop_mask_sky = mask_sky[ymin:ymax, xmin:xmax]
+        enhanced_sky_crop = enhance_sky_crop(
+            stacked_sky_crop,
+            crop_mask_sky,
+            beta=self.config.sky_stretch_beta,
+            target_black=self.config.target_black_floor,
+            contrast_boost=self.config.contrast_boost,
+            denoise=self.config.denoise_sky,
+        )
+
+        # Recompose enhanced sky crop onto the full canvas with non-overexposed ground baseline
+        full_sky = ground_layer.copy()
+        full_sky[ymin:ymax, xmin:xmax] = enhanced_sky_crop
+        sky_final = full_sky
 
         # Step 6: Composite & exports
         print("[6/6] Blending composite and exporting master outputs...")
@@ -174,6 +189,7 @@ class AstroPipeline:
         if self.config.save_intermediate_layers:
             save_preview_jpeg(ground_layer, self.config.output_dir / "ground_layer.jpg")
             save_preview_jpeg(sky_final, self.config.output_dir / "sky_layer.jpg")
+            save_preview_jpeg(enhanced_sky_crop, self.config.output_dir / "sky_crop_enhanced.jpg")
             save_preview_jpeg(mask_ground, self.config.output_dir / "horizon_mask.jpg")
 
         # Generate multi-row comparison card (all inputs + deliverables)

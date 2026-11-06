@@ -257,3 +257,117 @@ def warp_sky_to_stars(
         warped.append(w_img)
 
     return warped
+
+
+def get_sky_crop_bbox(
+    mask_sky: np.ndarray,
+    img_shape: Tuple[int, int],
+    margin: int = 20,
+) -> Tuple[int, int, int, int]:
+    """Calculate the minimal bounding box [ymin, ymax, xmin, xmax] containing celestial sky pixels."""
+    h, w = img_shape[:2]
+    m2d = mask_sky[:, :, 0] if mask_sky.ndim == 3 else mask_sky
+    sky_pts = np.where(m2d > 0.15)
+    if len(sky_pts[0]) > 200:
+        ymin = max(0, int(sky_pts[0].min()) - margin)
+        ymax = min(h, int(sky_pts[0].max()) + margin)
+        xmin = max(0, int(sky_pts[1].min()) - margin)
+        xmax = min(w, int(sky_pts[1].max()) + margin)
+        if (ymax - ymin) >= 64 and (xmax - xmin) >= 64:
+            return ymin, ymax, xmin, xmax
+    return 0, int(h * 0.70), 0, w
+
+
+def extract_and_align_sky_crops(
+    ground_aligned_images: List[np.ndarray],
+    mask_sky: np.ndarray,
+    ref_idx: int = 0,
+) -> Tuple[List[np.ndarray], Tuple[int, int, int, int], List[Tuple[float, float]]]:
+    """Extract cropped sky regions across all exposures and align stars to the reference crop.
+
+    Isolates the celestial sky area, replacing any ground/structure pixels within the crop
+    with the median sky baseline so terrestrial silhouettes do not shift into the sky.
+    Calculates sub-pixel star drift via frequency-domain phase correlation and warps each crop.
+    """
+    ref_img = ground_aligned_images[ref_idx]
+    h, w = ref_img.shape[:2]
+    ymin, ymax, xmin, xmax = get_sky_crop_bbox(mask_sky, (h, w))
+    crop_h, crop_w = ymax - ymin, xmax - xmin
+    m2d = mask_sky[:, :, 0] if mask_sky.ndim == 3 else mask_sky
+    crop_mask_sky = m2d[ymin:ymax, xmin:xmax]
+
+    print(f"  [Sky Crop] Bounding box: y=[{ymin}:{ymax}] (h={crop_h}px), x=[{xmin}:{xmax}] (w={crop_w}px)")
+
+    # 1. Extract sky crops, neutralizing non-sky pixels
+    sky_crops = []
+    for g_img in ground_aligned_images:
+        crop = g_img[ymin:ymax, xmin:xmax].copy()
+        pure_sky = crop[crop_mask_sky > 0.70]
+        med_val = float(np.median(pure_sky)) if len(pure_sky) > 0 else 0.03
+        crop[crop_mask_sky < 0.20] = med_val
+        sky_crops.append(crop)
+
+    # 2. Track celestial star drift on the crops
+    ref_crop = sky_crops[ref_idx]
+    ref_gray = cv2.cvtColor(ref_crop, cv2.COLOR_BGR2GRAY)
+    dog_ref = np.maximum(cv2.GaussianBlur(ref_gray, (3, 3), 0) - cv2.GaussianBlur(ref_gray, (25, 25), 0), 0.0)
+    p99 = float(np.percentile(dog_ref, 99.9))
+    dog_ref_norm = np.clip(dog_ref / max(1e-6, p99), 0.0, 1.0)
+    dog_ref_norm[dog_ref_norm < 0.15] = 0.0
+    hann = cv2.createHanningWindow((crop_w, crop_h), cv2.CV_32F)
+
+    star_shifts: List[Tuple[float, float]] = []
+    for i, crop in enumerate(sky_crops):
+        if i == ref_idx:
+            star_shifts.append((0.0, 0.0))
+            print(f"  [Star Drift] Crop {i+1}/{len(sky_crops)}: Celestial origin (0.0px, 0.0px)")
+            continue
+
+        c_gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        dog_c = np.maximum(cv2.GaussianBlur(c_gray, (3, 3), 0) - cv2.GaussianBlur(c_gray, (25, 25), 0), 0.0)
+        p = float(np.percentile(dog_c, 99.9))
+        dog_c_norm = np.clip(dog_c / max(1e-6, p), 0.0, 1.0)
+        dog_c_norm[dog_c_norm < 0.15] = 0.0
+        (dx, dy), resp = cv2.phaseCorrelate(dog_ref_norm.astype(np.float32), dog_c_norm.astype(np.float32), hann)
+
+        # Fallback to robust RANSAC feature matching if needed
+        if resp < 0.15:
+            try:
+                orb = cv2.ORB_create(nfeatures=1500)
+                u8_ref = (dog_ref_norm * 255).astype(np.uint8)
+                u8_c = (dog_c_norm * 255).astype(np.uint8)
+                kp1, des1 = orb.detectAndCompute(u8_ref, None)
+                kp2, des2 = orb.detectAndCompute(u8_c, None)
+                if des1 is not None and des2 is not None and len(kp1) >= 10 and len(kp2) >= 10:
+                    matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+                    matches = sorted(matcher.match(des1, des2), key=lambda x: x.distance)[:80]
+                    if len(matches) >= 6:
+                        pts_r = np.float32([kp1[m.queryIdx].pt for m in matches]).reshape(-1, 1, 2)
+                        pts_c = np.float32([kp2[m.trainIdx].pt for m in matches]).reshape(-1, 1, 2)
+                        M, inliers = cv2.estimateAffinePartial2D(pts_c, pts_r, method=cv2.RANSAC, ransacReprojThreshold=3.0)
+                        if M is not None and inliers is not None and np.sum(inliers) >= 4:
+                            orb_dx, orb_dy = float(M[0, 2]), float(M[1, 2])
+                            if abs(orb_dx) < crop_w * 0.15 and abs(orb_dy) < crop_h * 0.15:
+                                dx, dy, resp = orb_dx, orb_dy, 0.35
+            except Exception:
+                pass
+
+        if abs(dx) > (crop_w * 0.10) or abs(dy) > (crop_h * 0.10):
+            print(f"  [Star Drift] Warning: Improbable shift detected ({dx:.1f}px, {dy:.1f}px). Resetting to (0, 0).")
+            dx, dy = 0.0, 0.0
+
+        star_shifts.append((float(dx), float(dy)))
+        print(f"  [Star Drift] Crop {i+1}/{len(sky_crops)}: dx={dx:+.2f}px, dy={dy:+.2f}px (resp: {resp:.3f})")
+
+    # 3. Warp crops to register stars
+    warped_crops = []
+    for crop, (dx, dy) in zip(sky_crops, star_shifts):
+        M = np.float32([[1, 0, dx], [0, 1, dy]])
+        w_crop = cv2.warpAffine(
+            crop, M, (crop_w, crop_h),
+            flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
+            borderMode=cv2.BORDER_REFLECT
+        )
+        warped_crops.append(w_crop)
+
+    return warped_crops, (ymin, ymax, xmin, xmax), star_shifts
