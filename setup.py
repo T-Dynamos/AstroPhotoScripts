@@ -12,6 +12,7 @@ setup(
         "pillow>=10.0.0",
         "tifffile>=2023.7.10",
         "rawpy>=0.20.0",
+        "onnxruntime>=1.15.0",
     ],
     entry_points={
         "console_scripts": [

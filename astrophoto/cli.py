@@ -40,6 +40,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Foreground horizon type: 'auto' (detects whether landscape is illuminated vs dark silhouette), 'illuminated', or 'silhouette'."
     )
     run_parser.add_argument(
+        "--mask-engine", choices=["auto", "ai", "classic"], default="auto",
+        help="Horizon masking engine: 'auto' (SegFormer AI semantic segmentation with energy fallback, default), 'ai' (SegFormer ONNX), or 'classic' (Otsu energy profiling)."
+    )
+    run_parser.add_argument(
         "--horizon-radius", type=int, default=31,
         help="Guided filter edge refinement radius for tree branches, rooflines, and landscape boundaries (default: 31)."
     )
@@ -165,6 +169,7 @@ def main() -> None:
             output_dir=Path(args.output),
             ground_mode=args.ground_mode,
             foreground_type=args.foreground_type,
+            mask_engine=args.mask_engine,
             horizon_radius=args.horizon_radius,
             max_ground_clip_pct=args.max_clip,
             sky_stack_method=args.sky_method,

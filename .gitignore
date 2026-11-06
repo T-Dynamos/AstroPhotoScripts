@@ -226,3 +226,5 @@ output*/
 *.tiff
 *.hdr
 *.exr
+*.onnx
+models/

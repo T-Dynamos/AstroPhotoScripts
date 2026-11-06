@@ -3,3 +3,4 @@ opencv-python>=4.8.0
 pillow>=10.0.0
 tifffile>=2023.7.10
 rawpy>=0.20.0
+onnxruntime>=1.15.0

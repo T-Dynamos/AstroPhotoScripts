@@ -9,7 +9,10 @@ Supports any terrestrial landscape:
 - Both illuminated foregrounds and dark silhouette horizons
 """
 
+import os
+from pathlib import Path
 from typing import List, Optional, Tuple
+import urllib.request
 import cv2
 import numpy as np
 
@@ -44,17 +47,68 @@ def guided_filter(
     return np.clip(q, 0.0, 1.0)
 
 
+def get_segformer_model_path() -> Path:
+    """Return local path to cached SegFormer B0 ONNX model, auto-downloading if missing."""
+    cache_dir = Path.home() / ".cache" / "astrophoto" / "models"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    model_path = cache_dir / "segformer_b0.onnx"
+    if not model_path.exists() or model_path.stat().st_size < 10000000:
+        print("  [Mask Engine] Downloading lightweight SegFormer ONNX model (~15MB)...")
+        url = "https://huggingface.co/Xenova/segformer-b0-finetuned-ade-512-512/resolve/main/onnx/model.onnx"
+        urllib.request.urlretrieve(url, str(model_path))
+    return model_path
+
+
+def predict_segformer_sky(img_bgr: np.ndarray, min_sky_coverage: float = 0.05) -> Optional[np.ndarray]:
+    """Run SegFormer B0 ADE20K semantic segmentation to produce a high-confidence celestial sky probability map.
+
+    SegFormer distinguishes sky (Class 2) from ceilings (Class 5), walls (Class 0), buildings (Class 1),
+    floors (Class 3), and fences/railings (Class 32), eliminating false sky holes in shadowed ground
+    and preserving overhanging roofs/eaves without hand-crafted heuristics.
+    """
+    try:
+        import onnxruntime as ort
+        model_path = get_segformer_model_path()
+        session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
+
+        h_orig, w_orig = img_bgr.shape[:2]
+        u8 = np.clip(img_bgr * 255.0, 0, 255).astype(np.uint8) if img_bgr.dtype != np.uint8 else img_bgr
+        rgb = cv2.cvtColor(u8, cv2.COLOR_BGR2RGB)
+        resized = cv2.resize(rgb, (512, 512), interpolation=cv2.INTER_LINEAR).astype(np.float32)
+
+        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+        std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+        batch = np.expand_dims(((resized / 255.0 - mean) / std).transpose(2, 0, 1), axis=0)
+
+        logits = session.run(["logits"], {"pixel_values": batch})[0]
+        exp_logits = np.exp(logits[0] - np.max(logits[0], axis=0, keepdims=True))
+        probs = exp_logits / np.sum(exp_logits, axis=0, keepdims=True)
+        sky_prob_512 = probs[2]  # Class 2 = sky in ADE20K
+
+        coverage = float(np.mean(sky_prob_512 > 0.40))
+        if coverage >= min_sky_coverage:
+            print(f"  [Mask Engine] SegFormer AI semantic segmentation active ({coverage*100:.1f}% sky coverage detected).")
+            return cv2.resize(sky_prob_512, (w_orig, h_orig), interpolation=cv2.INTER_LINEAR)
+        return None
+    except Exception as e:
+        print(f"  [Mask Engine] AI segmentation unavailable ({e}). Falling back to energy segmentation.")
+        return None
+
+
 def segment_horizon_mask(
     reference_image_bgr: np.ndarray,
     foreground_type: str = "auto",
-    guided_radius: int = 25,
+    mask_engine: str = "auto",
+    guided_radius: int = 21,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Segment any terrestrial foreground (mountains, trees, buildings, railings, balconies, roofs) from celestial sky.
 
-    Uses adaptive night-sky luminance profiling with topological hole-filling and morphological
-    structure reconstruction. Handles overhead structures (roofs, eaves, tree branches) and complex
-    foregrounds without cutting dark lines or false chasms into shadowed ground.
-    Refines boundaries with an edge-preserving guided filter to ensure seamless alpha blending.
+    Supports:
+    - 'auto': Evaluates SegFormer AI semantic segmentation. If structural sky is detected with high confidence,
+              uses the AI semantic map. Otherwise falls back to adaptive landscape energy profiling.
+    - 'ai': Enforces SegFormer AI semantic segmentation.
+    - 'classic': Enforces classical adaptive energy/Otsu segmentation.
+    Both modes are edge-refined at native camera resolution using a fast edge-preserving guided filter.
     """
     if reference_image_bgr.dtype != np.float32:
         img_float = reference_image_bgr.astype(np.float32)
@@ -71,49 +125,46 @@ def segment_horizon_mask(
     p98 = float(np.percentile(gray, 98))
     norm_gray = np.clip((gray - p2) / max(1e-4, p98 - p2), 0.0, 1.0)
 
-    # Morphological star removal so star point sources do not trigger false foreground edges
-    star_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-    no_stars = cv2.morphologyEx(norm_gray, cv2.MORPH_OPEN, star_kernel)
-    smooth = cv2.GaussianBlur(no_stars, (25, 25), 0)
+    sky_prob_full = None
+    if mask_engine in ("auto", "ai"):
+        sky_prob_full = predict_segformer_sky(img_float)
 
-    # Adaptive celestial sky baseline: the lowest 15-20% smooth luminance represents the open night sky
-    sky_baseline = float(np.percentile(smooth, 15))
-    sky_std = float(np.std(smooth[smooth < np.percentile(smooth, 30)]))
+    if sky_prob_full is None:
+        # Classical landscape energy segmentation (ideal for wilderness dark-sky mountains)
+        print("  [Mask Engine] Using high-precision edge-preserving landscape energy segmentation.")
+        smooth = cv2.GaussianBlur(gray, (15, 15), 0)
+        otsu_th, _ = cv2.threshold((smooth[int(h * 0.20):, :] * 255).astype(np.uint8), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        otsu_val = otsu_th / 255.0
 
-    if foreground_type == "silhouette":
-        # Terrain is silhouetted against a brighter twilight sky
-        thresh = sky_baseline + max(0.04, sky_std * 2.0)
-        coarse = (smooth < thresh).astype(np.uint8) * 255
-    else:
-        # Default / Illuminated: celestial sky is the dark floor; terrestrial elements are above threshold
-        thresh = sky_baseline + max(0.04, sky_std * 3.5)
-        coarse = (smooth > thresh).astype(np.uint8) * 255
+        if foreground_type == "silhouette":
+            coarse_gnd = (smooth < (otsu_val * 1.5)).astype(np.float32)
+        else:
+            is_illuminated = float(smooth[int(h * 0.80):, :].mean()) >= float(smooth[:int(h * 0.25), :].mean())
+            if is_illuminated:
+                coarse_gnd = (smooth > (otsu_val * 0.5)).astype(np.float32)
+            else:
+                coarse_gnd = (smooth < (otsu_val * 1.5)).astype(np.float32)
 
-    # Morphological closing to bridge railings, window frames, cables, and terrain crevices
-    kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (41, 41))
-    closed = cv2.morphologyEx(coarse, cv2.MORPH_CLOSE, kernel_close)
+        # Morphological closing
+        kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 25))
+        closed_gnd = cv2.morphologyEx((coarse_gnd * 255).astype(np.uint8), cv2.MORPH_CLOSE, kernel_close)
 
-    # Topological hole-filling: fill dark shadow holes completely enclosed within terrestrial foreground
-    contours, hier = cv2.findContours(closed, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
-    filled = closed.copy()
-    if hier is not None:
-        for cnt, h_info in zip(contours, hier[0]):
-            # If contour is a child hole (enclosed within an outer foreground boundary)
-            if h_info[3] >= 0:
-                area = cv2.contourArea(cnt)
-                # Fill holes up to 15% of the entire frame area (shadows on floors, dark walls, etc.)
-                if area < (w * h * 0.15):
-                    cv2.drawContours(filled, [cnt], -1, 255, -1)
+        # Hole filling for shadow crevices
+        contours, hier = cv2.findContours(closed_gnd, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+        filled = closed_gnd.copy()
+        if hier is not None:
+            for cnt, h_info in zip(contours, hier[0]):
+                if h_info[3] >= 0:
+                    if cv2.contourArea(cnt) < (w * h * 0.15):
+                        cv2.drawContours(filled, [cnt], -1, 255, -1)
 
-    # Topological ground prior: ensure the bottom 8% is solid terrestrial floor
-    filled[int(h * 0.92):, :] = 255
+        filled[int(h * 0.95):, :] = 255
+        sky_prob_full = 1.0 - (filled.astype(np.float32) / 255.0)
 
-    # Edge-preserving guided filter refinement on normalized grayscale
-    coarse_float = filled.astype(np.float32) / 255.0
-    refined_mask = guided_filter(norm_gray, coarse_float, radius=guided_radius, eps=1e-3)
-
-    mask_fg = np.expand_dims(refined_mask, axis=2)
-    mask_sky = 1.0 - mask_fg
+    # Edge-preserving guided filter refinement at native resolution
+    refined_sky = guided_filter(norm_gray, sky_prob_full, radius=guided_radius, eps=1e-3)
+    mask_sky = np.expand_dims(refined_sky, axis=2)
+    mask_fg = 1.0 - mask_sky
     return mask_fg, mask_sky
 
 

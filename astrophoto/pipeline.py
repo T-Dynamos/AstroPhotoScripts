@@ -39,7 +39,8 @@ class PipelineConfig:
     output_dir: Path
     ground_mode: str = "fuse"  # 'fuse' or 'select'
     foreground_type: str = "auto"  # 'auto', 'illuminated', or 'silhouette'
-    horizon_radius: int = 25
+    mask_engine: str = "auto"  # 'auto' (SegFormer AI with energy fallback), 'ai', or 'classic'
+    horizon_radius: int = 21
     max_ground_clip_pct: float = 8.0
     sky_stack_method: str = "weighted"  # 'weighted' or 'median'
     sky_stretch_beta: float = 28.0
@@ -115,6 +116,7 @@ class AstroPipeline:
         mask_ground, mask_sky = segment_horizon_mask(
             ground_aligned[ref_idx],
             foreground_type=self.config.foreground_type,
+            mask_engine=self.config.mask_engine,
             guided_radius=self.config.horizon_radius,
         )
 
